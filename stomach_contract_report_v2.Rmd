@@ -1,0 +1,837 @@
+---
+title: "Default Rmarkdown Template"
+author: "Jack Auty"
+date: "`r Sys.Date()`"
+output:
+    html_document:
+      toc: true
+      toc_title: "Table of Contents"
+      number_sections: true
+---
+
+```{r CSS install, include=T, results='asis', comment=NA, echo=F}
+x <- tryCatch(readLines("https://raw.githubusercontent.com/JackAuty/RmarkdownStyle/main/styles.css"),
+              error=function(e) "")
+if (length(x)) cat("<style>\n", paste(x, collapse="\n"), "\n</style>")
+```
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+  echo    = TRUE,
+  warning = FALSE,
+  message = FALSE
+)
+options(scipen = 999)
+```
+
+# Load Required Packages
+
+```{r load-packages, warning=FALSE, message=FALSE, results='hide'}
+packages <- c("ggplot2", "cowplot", "viridisLite", "sjPlot")
+invisible(lapply(packages, function(pkg) {
+  if (!requireNamespace(pkg, quietly = TRUE)) install.packages(pkg)
+  library(pkg, character.only = TRUE)
+}))
+```
+
+# Citations
+```{r}
+pkg <- packages
+citation_list <- character()
+
+cln <- function(txt){
+  txt <- gsub("\\\\texttt\\{(.*?)\\}", "\\1", txt)
+  txt <- gsub("[_*\"“”]", "", txt)
+  txt <- gsub(", \\.$|\\s*\\.$", "", txt)
+  trimws(txt)
+}
+
+for (i in pkg) {
+  raw <- paste(capture.output(print(citation(i), style = "text", bibtex = FALSE)), collapse = "\n")
+  citation_list <- c(citation_list, cln(raw))
+}
+
+sjPlot::tab_df(
+  data.frame(References = citation_list),
+  col.header = "References",
+  sep = " "
+)
+```
+
+# Load and Prepare Data
+
+```{r load-data}
+DATA_DIR  <- "C:/Users/jrivers/Dropbox/Science/Projects/Stomach contraction paper/Plastic stomach contraction analysis v2"
+ts_path   <- file.path(DATA_DIR, "final_trim.csv")
+map_path  <- file.path(DATA_DIR, "video_map.csv")     # VIDEO, BIRD-ID, PHASE
+mass_path <- file.path(DATA_DIR, "masses.csv")        # ID, Total_mass, etc.
+
+ts_df   <- read.csv(ts_path,  check.names = TRUE)
+map_df  <- read.csv(map_path, check.names = TRUE, strip.white = TRUE)
+mass_df <- read.csv(mass_path, check.names = TRUE, strip.white = TRUE)
+
+
+# Normalise names / keys
+names(map_df) <- sub("BIRD[._-]?ID", "BIRD_ID", names(map_df), ignore.case = TRUE)
+
+norm_id_mass <- function(x){
+  x <- trimws(as.character(x))
+  out <- x
+  # NL-2025-10 -> NL-10
+  m <- grepl("^[A-Z]+-20[0-9]{2}-[0-9]+$", x)
+  out[m] <- sub("^([A-Z]+)-20[0-9]{2}-([0-9]+)$", "\\1-\\2", x[m])
+  # 380-02015 -> 02015
+  m <- grepl("^[0-9]{3}-[0-9]+$", x)
+  out[m] <- sub("^[0-9]{3}-([0-9]+)$", "\\1", x[m])
+  out
+}
+map_df$BIRD_KEY  <- trimws(as.character(map_df$BIRD_ID))
+mass_df$BIRD_KEY <- norm_id_mass(mass_df$ID)
+tab_df(head(mass_df))
+tab_df(table(mass_df$ID))
+#Find all rows with duplicate BIRD_KEY and add those weights and numbers together.
+#
+#
+
+
+# Ensure numeric time series
+ts_df[] <- lapply(ts_df, function(x) suppressWarnings(as.numeric(x)))
+
+# Helpers
+make_long <- function(df, suffix){
+  keep <- names(df)[grepl(paste0("(", suffix, ")$"), names(df), ignore.case = TRUE)]
+  L <- stack(df[keep])
+  L$time <- rep.int(seq_len(nrow(df)), times = length(keep))
+  names(L) <- c("values", "ind", "time")
+  L$VIDEO <- sub(paste0("_(?i:", suffix, ")$"), "", L$ind, perl = TRUE)
+  L
+}
+
+baseline_correct <- function(df){
+  df <- df[order(df$VIDEO, df$time), ]
+  df$baseline0 <- NA_real_
+  vids <- unique(df$VIDEO)
+  for (v in vids){
+    idx <- which(df$VIDEO == v)
+    d   <- df[idx, ]
+    i0  <- which(d$time == 0 & !is.na(d$values))
+    if (!length(i0)) i0 <- which(!is.na(d$values))[1]
+    if (length(i0)) df$baseline0[idx] <- d$values[i0[1]]
+  }
+  df$value_delta <- df$values - df$baseline0
+  df
+}
+
+group_plastic <- function(df){
+  df$plastic_group <- ifelse(is.na(df$Total_mass), NA,
+                             ifelse(df$Total_mass > 0.5, "High plastic (>0.5)", "Low plastic (≤0.5)"))
+  df$plastic_group <- factor(df$plastic_group,
+                             levels = c("Low plastic (≤0.5)", "High plastic (>0.5)"))
+  df
+}
+
+mean_sem <- function(x){
+  m  <- mean(x, na.rm = TRUE)
+  sd <- stats::sd(x, na.rm = TRUE)
+  n  <- sum(!is.na(x))
+  c(mean = m, sd = sd, n = n)
+}
+
+# Palette and theme
+pal_group <- c("Low plastic (≤0.5)" = "#0072B2", "High plastic (>0.5)" = "#D55E00")
+na_col    <- "#999999"
+theme_small <- theme_minimal(base_size = 7) +
+  theme(
+    panel.grid.minor = element_blank(),
+    axis.text  = element_text(size = 6),
+    axis.title = element_text(size = 7),
+    plot.title = element_text(size = 8),
+    plot.subtitle = element_text(size = 7)
+  )
+
+t_max <- 120
+```
+
+# Build Long Data and Join Metadata
+
+```{r build-merged}
+raw_long <- make_long(ts_df, "raw")
+sm_long  <- make_long(ts_df, "smoothed")
+
+keep_cols <- c("VIDEO", "BIRD_ID", "BIRD_KEY", "PHASE")
+raw_m <- merge(raw_long, map_df[keep_cols], by = "VIDEO", all.x = TRUE)
+sm_m  <- merge(sm_long,  map_df[keep_cols], by = "VIDEO", all.x = TRUE)
+
+mass_keep <- intersect(c("BIRD_KEY","Stomach_mass","Stomach_number","Gizz_mass",
+                         "Gizz_number","Total_mass","Total_number"),
+                       names(mass_df))
+merged_raw <- merge(raw_m, mass_df[mass_keep], by = "BIRD_KEY", all.x = TRUE)
+merged_sm  <- merge(sm_m, mass_df[mass_keep], by = "BIRD_KEY", all.x = TRUE)
+```
+
+# Overview: Raw vs Smoothed
+
+```{r overview-plot}
+long_all <- rbind(
+  transform(raw_long, Type = "Raw"),
+  transform(sm_long,  Type = "Smoothed")
+)
+
+p_over <- ggplot(long_all, aes(time, values, colour = ind, group = ind)) +
+  geom_line(linewidth = 0.3, na.rm = TRUE) +
+  facet_wrap(~ Type, ncol = 1, scales = "free_y") +
+  scale_colour_viridis_d(option = "D", begin = 0.2, end = 0.8, guide = "none") +
+  labs(title = "Stomach contraction traces", x = "Frame index", y = "Amplitude") +
+  theme_small
+print(p_over)
+```
+
+# Contract Phase, RAW: Baseline, t ≤ 120, Mean ± SEM
+
+```{r contract-raw}
+contract_raw <- merged_raw[grepl("^Contract", merged_raw$PHASE, ignore.case = TRUE), ]
+contract_raw$VIDEO <- factor(contract_raw$VIDEO, levels = unique(contract_raw$VIDEO))
+contract_raw <- group_plastic(contract_raw)
+contract_raw <- baseline_correct(contract_raw)
+contract_raw <- contract_raw[contract_raw$time <= t_max, ]
+
+# Traces
+p_contract_raw <- ggplot(contract_raw,
+                         aes(x = time, y = value_delta, colour = plastic_group, group = VIDEO)) +
+  geom_hline(yintercept = 0, linewidth = 0.2, colour = "grey60") +
+  geom_line(linewidth = 0.3, alpha = 0.9, na.rm = TRUE) +
+  scale_colour_manual(values = pal_group, na.value = na_col,
+                      guide = guide_legend(title = "Plastic load", ncol = 1)) +
+  labs(title = "Contract phase, baseline-corrected RAW traces",
+       subtitle = "Δ from t = 0",
+       x = "Frame index", y = "Δ Amplitude") +
+  theme_small
+print(p_contract_raw)
+
+# Mean ± SEM
+agg_r <- aggregate(value_delta ~ time + plastic_group, data = contract_raw, FUN = mean_sem)
+agg_r <- data.frame(time = agg_r$time,
+                    plastic_group = agg_r$plastic_group,
+                    mean = agg_r$value_delta[, "mean"],
+                    sd   = agg_r$value_delta[, "sd"],
+                    n    = agg_r$value_delta[, "n"])
+agg_r$sem   <- with(agg_r, sd / sqrt(pmax(n, 1)))
+agg_r$lower <- agg_r$mean - agg_r$sem
+agg_r$upper <- agg_r$mean + agg_r$sem
+agg_r <- agg_r[!is.na(agg_r$plastic_group), ]
+
+p_contract_raw_mean <- ggplot(agg_r, aes(x = time, y = mean, colour = plastic_group, fill = plastic_group)) +
+  geom_hline(yintercept = 0, linewidth = 0.2, colour = "grey60") +
+  geom_ribbon(aes(ymin = lower, ymax = upper), alpha = 0.15, colour = NA) +
+  geom_line(linewidth = 0.7) +
+  scale_colour_manual(values = pal_group, guide = guide_legend(title = "Plastic load")) +
+  scale_fill_manual(values = pal_group, guide = "none") +
+  labs(title = "Contract phase, RAW mean ± SEM", subtitle = "Δ from t = 0",
+       x = "Frame index", y = "Mean Δ Amplitude") +
+  coord_cartesian(xlim = c(0, t_max)) +
+  theme_small
+print(p_contract_raw_mean)
+```
+
+# Contract Phase, SMOOTHED: Baseline, t ≤ 120, Labels, Mean ± SEM
+
+```{r contract-smoothed}
+sm_contract <- merged_sm[grepl("^Contract", merged_sm$PHASE, ignore.case = TRUE), ]
+sm_contract$VIDEO <- factor(sm_contract$VIDEO, levels = unique(sm_contract$VIDEO))
+sm_contract <- group_plastic(sm_contract)
+sm_contract <- baseline_correct(sm_contract)
+sm_contract <- sm_contract[sm_contract$time <= t_max, ]
+
+# End-of-line labels at right edge, not clipped
+end_lab <- do.call(rbind, lapply(split(sm_contract, sm_contract$VIDEO), function(d){
+  d <- d[!is.na(d$value_delta), ]
+  if (!nrow(d)) return(NULL)
+  out <- d[nrow(d), c("time","value_delta","VIDEO","plastic_group")]
+  out$time <- t_max
+  out
+}))
+
+p_contract_sm <- ggplot(sm_contract,
+                        aes(x = time, y = value_delta, colour = plastic_group, group = VIDEO)) +
+  geom_hline(yintercept = 0, linewidth = 0.2, colour = "grey60") +
+  geom_line(linewidth = 0.3, alpha = 0.9, na.rm = TRUE) +
+  geom_text(data = end_lab, aes(label = VIDEO), hjust = 0, vjust = 0.5,
+            size = 1.8, show.legend = FALSE) +
+  scale_colour_manual(values = pal_group, na.value = na_col,
+                      guide = guide_legend(title = "Plastic load", ncol = 1)) +
+  labs(title = "Contract phase, baseline-corrected SMOOTHED traces",
+       subtitle = "Δ from t = 0, IDs labelled",
+       x = "Frame index", y = "Δ Amplitude") +
+  coord_cartesian(xlim = c(0, t_max), clip = "off") +
+  theme_small +
+  theme(plot.margin = margin(5.5, 40, 5.5, 5.5))
+print(p_contract_sm)
+
+# Mean ± SEM
+agg_s <- aggregate(value_delta ~ time + plastic_group, data = sm_contract, FUN = mean_sem)
+agg_s <- data.frame(time = agg_s$time,
+                    plastic_group = agg_s$plastic_group,
+                    mean = agg_s$value_delta[, "mean"],
+                    sd   = agg_s$value_delta[, "sd"],
+                    n    = agg_s$value_delta[, "n"])
+agg_s$sem   <- with(agg_s, sd / sqrt(pmax(n, 1)))
+agg_s$lower <- agg_s$mean - agg_s$sem
+agg_s$upper <- agg_s$mean + agg_s$sem
+agg_s <- agg_s[!is.na(agg_s$plastic_group), ]
+
+p_contract_sm_mean <- ggplot(agg_s, aes(x = time, y = mean, colour = plastic_group, fill = plastic_group)) +
+  geom_hline(yintercept = 0, linewidth = 0.2, colour = "grey60") +
+  geom_ribbon(aes(ymin = lower, ymax = upper), alpha = 0.15, colour = NA) +
+  geom_line(linewidth = 0.7) +
+  scale_colour_manual(values = pal_group, guide = guide_legend(title = "Plastic load")) +
+  scale_fill_manual(values = pal_group, guide = "none") +
+  labs(title = "Contract phase, SMOOTHED mean ± SEM", subtitle = "Δ from t = 0",
+       x = "Frame index", y = "Mean Δ Amplitude") +
+  coord_cartesian(xlim = c(0, t_max)) +
+  theme_small
+print(p_contract_sm_mean)
+```
+```{r}
+# ===== Relaxation phase (SMOOTHED): baseline-corrected traces + mean ± SEM =====
+# Requirements: merged_sm, group_plastic(), baseline_correct(), mean_sem(),
+#               pal_group, na_col, theme_small. Uses t_max if defined; else 120.
+
+if (!exists("t_max")) t_max <- 120
+
+# 1) Filter to Relax/Relaxation phase
+relax_sm <- merged_sm[grepl("^(Relax|Relaxation)", merged_sm$PHASE, ignore.case = TRUE), ]
+
+# 2) Group + stable VIDEO factor + baseline-correct + limit time
+relax_sm$VIDEO <- factor(relax_sm$VIDEO, levels = unique(relax_sm$VIDEO))
+relax_sm <- group_plastic(relax_sm)
+relax_sm <- baseline_correct(relax_sm)
+relax_sm <- relax_sm[relax_sm$time <= t_max, ]
+
+# 3) End-of-line labels (anchor at right edge so labels aren't clipped)
+end_lab_relax <- do.call(rbind, lapply(split(relax_sm, relax_sm$VIDEO), function(d){
+  d <- d[!is.na(d$value_delta), ]
+  if (!nrow(d)) return(NULL)
+  out <- d[nrow(d), c("time","value_delta","VIDEO","plastic_group")]
+  out$time <- t_max
+  out
+}))
+
+# 4) Plot baseline-corrected smoothed traces with VIDEO labels
+p_relax_sm <- ggplot(relax_sm,
+                     aes(x = time, y = value_delta, colour = plastic_group, group = VIDEO)) +
+  geom_hline(yintercept = 0, linewidth = 0.2, colour = "grey60") +
+  geom_line(linewidth = 0.3, alpha = 0.9, na.rm = TRUE) +
+  geom_text(data = end_lab_relax, aes(label = VIDEO),
+            hjust = 0, vjust = 0.5, size = 1.8, show.legend = FALSE) +
+  scale_colour_manual(values = pal_group, na.value = na_col,
+                      guide = guide_legend(title = "Plastic load", ncol = 1)) +
+  labs(title = "Relaxation phase, baseline-corrected SMOOTHED traces",
+       subtitle = "Δ from t = 0, IDs labelled",
+       x = "Frame index", y = "Δ Amplitude") +
+  coord_cartesian(xlim = c(0, t_max), clip = "off") +
+  theme_small +
+  theme(plot.margin = margin(5.5, 40, 5.5, 5.5))
+print(p_relax_sm)
+
+# 5) Mean ± SEM by group
+agg_relax <- aggregate(value_delta ~ time + plastic_group, data = relax_sm, FUN = mean_sem)
+agg_relax <- data.frame(time = agg_relax$time,
+                        plastic_group = agg_relax$plastic_group,
+                        mean = agg_relax$value_delta[, "mean"],
+                        sd   = agg_relax$value_delta[, "sd"],
+                        n    = agg_relax$value_delta[, "n"])
+agg_relax$sem   <- with(agg_relax, sd / sqrt(pmax(n, 1)))
+agg_relax$lower <- agg_relax$mean - agg_relax$sem
+agg_relax$upper <- agg_relax$mean + agg_relax$sem
+agg_relax <- agg_relax[!is.na(agg_relax$plastic_group), ]
+
+p_relax_sm_mean <- ggplot(agg_relax,
+                          aes(x = time, y = mean, colour = plastic_group, fill = plastic_group)) +
+  geom_hline(yintercept = 0, linewidth = 0.2, colour = "grey60") +
+  geom_ribbon(aes(ymin = lower, ymax = upper), alpha = 0.15, colour = NA) +
+  geom_line(linewidth = 0.7) +
+  scale_colour_manual(values = pal_group, guide = guide_legend(title = "Plastic load")) +
+  scale_fill_manual(values = pal_group, guide = "none") +
+  labs(title = "Relaxation phase, SMOOTHED mean ± SEM",
+       subtitle = "Δ from t = 0",
+       x = "Frame index", y = "Mean Δ Amplitude") +
+  coord_cartesian(xlim = c(0, t_max)) +
+  theme_small
+print(p_relax_sm_mean)
+
+```
+
+
+```{r}
+# Lighter colours, line behind points, Pearson only
+stopifnot(exists("mass_df"), is.data.frame(mass_df))
+df <- subset(mass_df, is.finite(Total_mass) & is.finite(Wt))
+
+pear <- suppressWarnings(cor(df$Total_mass, df$Wt, use = "complete.obs", method = "pearson"))
+
+library(ggplot2)
+
+line_col  <- "grey55"
+line_fill <- "grey85"
+point_fill <- grDevices::adjustcolor("#0072B2", alpha.f = 0.35)  # soft blue
+point_edge <- "grey25"
+
+p_wt_vs_plastic <- ggplot(df, aes(x = Total_mass, y = Wt)) +
+  # linear model first so it's behind the points
+  geom_smooth(method = "lm", se = TRUE, linewidth = 0.9,
+              colour = line_col,
+              fill   = line_fill,
+              na.rm  = TRUE) +
+  geom_point(shape = 21, size = 2.4, stroke = 0.3,
+             colour = point_edge, fill = point_fill, na.rm = TRUE) +
+  labs(
+    title    = "Stomach weight vs plastic mass",
+    subtitle = sprintf("Linear fit • Pearson r = %.2f", pear),
+    x = "Plastic mass (g)",
+    y = "Stomach weight (g)"
+  ) +
+  theme_classic(base_size = 11) +
+  theme(
+    panel.grid    = element_blank(),   # no grid lines
+    axis.line     = element_line(linewidth = 0.6),
+    axis.ticks    = element_line(linewidth = 0.5),
+    plot.title    = element_text(face = "bold"),
+    plot.subtitle = element_text(size = 10)
+  ) +
+  scale_x_continuous(expand = expansion(mult = c(0.02, 0.05))) +
+  scale_y_continuous(expand = expansion(mult = c(0.02, 0.05)))
+
+print(p_wt_vs_plastic)
+
+```
+```{r}
+# --- Publication figure: (A) Wt vs plastic mass  |  (B) Contract SM mean ± SEM (minutes) ---
+# Requires: p_wt_vs_plastic, agg_s (with columns: time, mean, lower, upper, plastic_group), t_max
+# Legend placed below (B). Titles removed. Wider layout. Export to PDF.
+
+library(ggplot2)
+library(cowplot)
+
+# Fallback palette (if not already defined)
+if (!exists("pal_group")) {
+  pal_group <- c("Low plastic (≤0.5)" = "#0072B2", "High plastic (>0.5)" = "#D55E00")
+}
+
+# ---- Panel A (clean) ----
+stopifnot(exists("p_wt_vs_plastic"))
+pA <- p_wt_vs_plastic +
+  labs(title = NULL, subtitle = NULL) +
+  theme_classic(base_size = 11) +
+  theme(
+    panel.grid  = element_blank(),
+    axis.line   = element_line(linewidth = 0.6),
+    axis.ticks  = element_line(linewidth = 0.5),
+    plot.margin = margin(2, 4, 2, 2)  # trim whitespace
+  )
+
+# ---- Panel B (rebuild with minutes on x; legend below; y-label updated) ----
+stopifnot(exists("agg_s"))
+agg_s$time_min <- agg_s$time / 2  # 30 sec per frame -> minutes
+pB_core <- ggplot(agg_s, aes(x = time_min, y = mean, colour = plastic_group, fill = plastic_group)) +
+  geom_hline(yintercept = 0, linewidth = 0.25, colour = "grey70") +
+  geom_ribbon(aes(ymin = lower, ymax = upper), alpha = 0.12, colour = NA) +
+  geom_line(linewidth = 0.9) +
+  scale_colour_manual(values = pal_group, guide = guide_legend(title = "Plastic load")) +
+  scale_fill_manual(values = pal_group, guide = "none") +
+  labs(x = "Time (minutes)", y = "Mean contraction force (\u0394 g)") +
+  coord_cartesian(xlim = c(0, if (exists("t_max")) t_max/2 else max(agg_s$time_min, na.rm = TRUE))) +
+  theme_classic(base_size = 11) +
+  theme(
+    panel.grid     = element_blank(),
+    axis.line      = element_line(linewidth = 0.6),
+    axis.ticks     = element_line(linewidth = 0.5),
+    legend.position = "bottom",
+    legend.direction = "horizontal",
+    legend.box      = "horizontal",
+    legend.margin   = margin(t = 2, unit = "pt"),
+    legend.title    = element_text(size = 9),
+    legend.text     = element_text(size = 9),
+    plot.margin     = margin(2, 2, 2, 4)   # trim whitespace; a bit more left padding
+  )
+
+# Build legend below B only
+leg_B <- cowplot::get_legend(pB_core)
+pB_noleg <- pB_core + theme(legend.position = "none")
+
+# Stack B + legend (legend short)
+pB <- plot_grid(pB_noleg, leg_B, ncol = 1, rel_heights = c(1, 0.14))
+
+# ---- Combine A and B side-by-side with tags ----
+fig_AB <- plot_grid(
+  pA, pB,
+  labels = c("A", "B"),
+  label_fontface = "bold",
+  label_size = 14,
+  nrow = 1,
+  align = "hv",
+  rel_widths = c(1, 1.25)  # slightly wider right panel
+)
+
+print(fig_AB)
+# ---- Export to PDF (wider page, minimal margins) ----
+ggsave(
+  filename = "figure_AB.pdf",
+  plot     = fig_AB,
+  device   = cairo_pdf,   # better fonts/embedding
+  width    = 260,         # mm (wider)
+  height   = 95,          # mm
+  units    = "mm"
+)
+
+
+```
+
+```{r}
+# === Square 2x2 figure with legend in D ===
+# A: Wt vs plastic (points coloured by plastic_group)
+# B: Contract mean ± SEM (minutes)
+# C: Relaxation mean ± SEM (minutes)
+# D: Legend ONLY (robust)
+library(ggplot2)
+library(cowplot)
+library(grid)
+
+# Palette / settings
+if (!exists("pal_group")) {
+  pal_group <- c("Low plastic (≤0.5)" = "#0072B2", "High plastic (>0.5)" = "#D55E00")
+}
+if (!exists("t_max")) t_max <- 120
+xmax_min <- t_max / 2
+
+# ---------- Panel A ----------
+stopifnot(exists("mass_df"))
+dfA <- subset(mass_df, is.finite(Total_mass) & is.finite(Wt))
+dfA$plastic_group <- factor(ifelse(dfA$Total_mass > 0.5,
+                                   "High plastic (>0.5)", "Low plastic (≤0.5)"),
+                            levels = names(pal_group))
+
+pA <- ggplot(dfA, aes(Total_mass, Wt,colour = plastic_group, fill = plastic_group)) +
+  geom_smooth(method = "lm", se = TRUE, colour = "grey40",
+              fill = grDevices::adjustcolor("grey40", alpha.f = 0.125),
+              linewidth = 0.5) +
+  geom_point(aes(colour = plastic_group, fill = plastic_group),
+             shape = 21, size = 2.4, stroke = 0.35,
+             alpha = 0.4) +
+  scale_colour_manual(values = pal_group, name = "Plastic load") +
+  scale_fill_manual(values = pal_group, guide = "none")+
+  labs(x = "Plastic mass (g)", y = "Stomach weight (g)") +
+  theme_classic(base_size = 11) +
+  theme(panel.grid = element_blank(),
+        axis.line  = element_line(linewidth = 0.6),
+        axis.ticks = element_line(linewidth = 0.5),
+        plot.margin = margin(2, 2, 2, 2),
+        legend.position = "none")
+
+# ---------- Panel B (Contract) ----------
+stopifnot(exists("agg_s"))
+agg_s2 <- transform(agg_s, time_min = time / 2)
+
+pB_core <- ggplot(agg_s2, aes(x = time_min, y = mean, colour = plastic_group, fill = plastic_group)) +
+  geom_hline(yintercept = 0, linewidth = 0.25, colour = "grey70") +
+  geom_ribbon(aes(ymin = lower, ymax = upper), alpha = 0.12, colour = NA) +
+  geom_line(linewidth = 0.9) +
+  scale_colour_manual(values = pal_group, name = "Plastic load") +
+  scale_fill_manual(values = pal_group, guide = "none") +
+  labs(x = "Time (minutes)", y = "Contraction force (\u0394 g)") +
+  coord_cartesian(xlim = c(0, xmax_min)) +
+  theme_classic(base_size = 10) +
+  theme(panel.grid = element_blank(),
+        axis.line  = element_line(linewidth = 0.6),
+        axis.ticks = element_line(linewidth = 0.5),
+        legend.position = "bottom",
+        legend.direction = "horizontal",
+        legend.title = element_text(size = 10),
+        legend.text  = element_text(size = 10),
+        plot.margin  = margin(2, 2, 2, 2))
+pB_noleg <- pB_core + theme(legend.position = "none")
+
+# ---------- Panel C (Relaxation) ----------
+if (!exists("agg_relax")) {
+  stopifnot(exists("merged_sm"), exists("group_plastic"), exists("baseline_correct"), exists("mean_sem"))
+  relax_sm <- merged_sm[grepl("^(Relax|Relaxation)", merged_sm$PHASE, ignore.case = TRUE), ]
+  relax_sm$VIDEO <- factor(relax_sm$VIDEO, levels = unique(relax_sm$VIDEO))
+  relax_sm <- group_plastic(relax_sm)
+  relax_sm <- baseline_correct(relax_sm)
+  relax_sm <- relax_sm[relax_sm$time <= t_max, ]
+  tmp <- aggregate(value_delta ~ time + plastic_group, data = relax_sm, FUN = mean_sem)
+  agg_relax <- data.frame(
+    time          = tmp$time,
+    plastic_group = tmp$plastic_group,
+    mean          = tmp$value_delta[, "mean"],
+    sd            = tmp$value_delta[, "sd"],
+    n             = tmp$value_delta[, "n"]
+  )
+  agg_relax$sem   <- with(agg_relax, sd / sqrt(pmax(n, 1)))
+  agg_relax$lower <- agg_relax$mean - agg_relax$sem
+  agg_relax$upper <- agg_relax$mean + agg_relax$sem
+  agg_relax <- agg_relax[!is.na(agg_relax$plastic_group), ]
+}
+agg_relax2 <- transform(agg_relax, time_min = time / 2)
+
+pC_core <- ggplot(agg_relax2, aes(x = time_min, y = mean, colour = plastic_group, fill = plastic_group)) +
+  geom_hline(yintercept = 0, linewidth = 0.25, colour = "grey70") +
+  geom_ribbon(aes(ymin = lower, ymax = upper), alpha = 0.12, colour = NA) +
+  geom_line(linewidth = 0.9) +
+  scale_colour_manual(values = pal_group, name = "Plastic load") +
+  scale_fill_manual(values = pal_group, guide = "none") +
+  labs(x = "Time (minutes)", y = "Relaxation (\u0394 g)") +
+  coord_cartesian(xlim = c(0, xmax_min)) +
+  theme_classic(base_size = 10) +
+  theme(panel.grid = element_blank(),
+        axis.line  = element_line(linewidth = 0.6),
+        axis.ticks = element_line(linewidth = 0.5),
+        legend.position = "bottom",
+        legend.direction = "horizontal",
+        legend.title = element_text(size = 10),
+        legend.text  = element_text(size = 10),
+        plot.margin  = margin(2, 2, 2, 2))
+pC_noleg <- pC_core + theme(legend.position = "none")
+
+# ---------- Panel D (Legend only) — robust creation ----------
+# 1) Try to extract directly from B (preferred look)
+leg_grob <- tryCatch(
+  cowplot::get_legend(pB_core + theme(legend.position = "center")),
+  error = function(e) NULL
+)
+
+# 2) Fallback: build a tiny dummy plot that ONLY produces the legend
+if (is.null(leg_grob) || !inherits(leg_grob, "gtable")) {
+  legend_df <- data.frame(
+    plastic_group = factor(names(pal_group), levels = names(pal_group)),
+    x = 1, y = 1
+  )
+  p_leg <- ggplot(legend_df, aes(x, y, colour = plastic_group)) +
+    geom_point(size = 3) +
+    scale_colour_manual(values = pal_group, name = "Plastic load") +
+    theme_void(base_size = 11) +
+    theme(legend.position = "center",
+          legend.direction = "horizontal",
+          legend.title = element_text(size = 11),
+          legend.text  = element_text(size = 10))
+  leg_grob <- cowplot::get_legend(p_leg)
+}
+pD <- ggdraw() + draw_grob(leg_grob)
+
+# ---------- Assemble 2x2 square and export ----------
+top_row <- plot_grid(pA, pB_noleg, ncol = 2, labels = c("A", "B"),
+                     label_fontface = "bold", label_size = 14)
+bot_row <- plot_grid(pC_noleg, pD,    ncol = 2, labels = c("C", "D"),
+                     label_fontface = "bold", label_size = 14)
+fig_ABCD <- plot_grid(top_row, bot_row, nrow = 2, rel_heights = c(1, 1))
+
+ggsave("figure_ABCD_square.pdf", fig_ABCD, device = cairo_pdf,
+       width = 180, height = 180, units = "mm")
+
+
+
+
+fig_ABCD
+
+```
+
+```{r}
+# === Square 2x2 figure with THREE groups (<0.3 g, 0.3–20 g, ≥20 g) and legend in D ===
+# A: Wt vs plastic (points coloured by 3 groups)
+# B: Contract mean ± SEM (minutes, 3 groups)
+# C: Relaxation mean ± SEM (minutes, 3 groups)
+# D: Legend ONLY
+
+library(ggplot2)
+library(cowplot)
+library(grid)
+
+# --- Settings & helpers ---
+if (!exists("t_max")) t_max <- 120
+xmax_min <- t_max / 2
+
+# helper: baseline if missing
+if (!exists("baseline_correct")) {
+  baseline_correct <- function(df){
+    df <- df[order(df$VIDEO, df$time), ]
+    df$baseline0 <- NA_real_
+    for (v in unique(df$VIDEO)) {
+      idx <- which(df$VIDEO == v)
+      d   <- df[idx, ]
+      i0  <- which(d$time == 0 & !is.na(d$value))
+      if (!length(i0)) i0 <- which(!is.na(d$value))[1]
+      if (length(i0)) df$baseline0[idx] <- d$value[i0[1]]
+    }
+    df$value_delta <- df$value - df$baseline0
+    df
+  }
+}
+if (!exists("mean_sem")) {
+  mean_sem <- function(x){
+    m  <- mean(x, na.rm = TRUE)
+    sd <- stats::sd(x, na.rm = TRUE)
+    n  <- sum(!is.na(x))
+    c(mean = m, sd = sd, n = n)
+  }
+}
+
+# 3-level grouping function
+group_plastic_3 <- function(x){
+  out <- ifelse(is.na(x), NA_character_,
+         ifelse(x < 0.5, "Low plastic (<0.5 g)",
+         ifelse(x < 30,  "Medium plastic (0.5–25 g)",
+                        "High plastic (≥25 g)")))
+  factor(out, levels = c("Low plastic (<0.5 g)", "Medium plastic (0.5–25 g)", "High plastic (≥25 g)"))
+}
+
+# Palette for 3 groups (Okabe–Ito)
+pal_group3 <- c(
+  "Low plastic (<0.5 g)"       = "#0072B2", # blue
+  "Medium plastic (0.5–25 g)"  = "#009E73", # bluish green
+  "High plastic (≥25 g)"       = "#D55E00"  # vermillion
+)
+
+# ---------- Panel A: Wt vs plastic (3 groups) ----------
+stopifnot(exists("mass_df"))
+dfA <- subset(mass_df, is.finite(Total_mass) & is.finite(Wt))
+dfA$plastic_group3 <- group_plastic_3(dfA$Total_mass)
+
+pA <- ggplot(dfA, aes(Total_mass, Wt)) +
+  geom_smooth(method = "lm", se = TRUE, colour = "grey40",
+              fill = grDevices::adjustcolor("grey40", alpha.f = 0.125),
+              linewidth = 0.6) +
+  geom_point(aes(fill = plastic_group3),
+             shape = 21, size = 2.4, stroke = 0.35,
+             colour = "black", alpha = 0.8) +
+  scale_fill_manual(values = pal_group3, guide = "none") +
+  labs(x = "Plastic mass (g)", y = "Stomach weight (g)") +
+  theme_classic(base_size = 10) +
+  theme(panel.grid = element_blank(),
+        axis.line  = element_line(linewidth = 0.6),
+        axis.ticks = element_line(linewidth = 0.5),
+        plot.margin = margin(2, 2, 2, 2))
+
+# ---------- Panel B: Contract mean ± SEM (minutes, 3 groups) ----------
+stopifnot(exists("merged_sm"))
+contract_sm <- merged_sm[grepl("^Contract", merged_sm$PHASE, ignore.case = TRUE), ]
+contract_sm$VIDEO <- factor(contract_sm$VIDEO, levels = unique(contract_sm$VIDEO))
+contract_sm <- baseline_correct(contract_sm)
+contract_sm <- contract_sm[contract_sm$time <= t_max, ]
+contract_sm$plastic_group3 <- group_plastic_3(contract_sm$Total_mass)
+
+agg_contract3 <- aggregate(value_delta ~ time + plastic_group3, data = contract_sm, FUN = mean_sem)
+agg_contract3 <- data.frame(
+  time          = agg_contract3$time,
+  plastic_group3= agg_contract3$plastic_group3,
+  mean          = agg_contract3$value_delta[, "mean"],
+  sd            = agg_contract3$value_delta[, "sd"],
+  n             = agg_contract3$value_delta[, "n"]
+)
+agg_contract3$sem   <- with(agg_contract3, sd / sqrt(pmax(n, 1)))
+agg_contract3$lower <- agg_contract3$mean - agg_contract3$sem
+agg_contract3$upper <- agg_contract3$mean + agg_contract3$sem
+agg_contract3 <- agg_contract3[!is.na(agg_contract3$plastic_group3), ]
+agg_contract3$time_min <- agg_contract3$time / 2
+
+pB_core <- ggplot(agg_contract3,
+                  aes(x = time_min, y = mean, colour = plastic_group3, fill = plastic_group3)) +
+  geom_hline(yintercept = 0, linewidth = 0.25, colour = "grey70") +
+  geom_ribbon(aes(ymin = lower, ymax = upper), alpha = 0.12, colour = NA) +
+  geom_line(linewidth = 0.9) +
+  scale_colour_manual(values = pal_group3, name = "Plastic load") +
+  scale_fill_manual(values = pal_group3, guide = "none") +
+  labs(x = "Time (minutes)", y = "Mean contraction force (\u0394 g)") +
+  coord_cartesian(xlim = c(0, xmax_min)) +
+  theme_classic(base_size = 10) +
+  theme(panel.grid = element_blank(),
+        axis.line  = element_line(linewidth = 0.6),
+        axis.ticks = element_line(linewidth = 0.5),
+        legend.position = "bottom",
+        legend.direction = "horizontal",
+        legend.title = element_text(size = 10),
+        legend.text  = element_text(size = 10),
+        plot.margin  = margin(2, 2, 2, 2))
+pB_noleg <- pB_core + theme(legend.position = "none")
+
+# ---------- Panel C: Relaxation mean ± SEM (minutes, 3 groups) ----------
+relax_sm <- merged_sm[grepl("^(Relax|Relaxation)", merged_sm$PHASE, ignore.case = TRUE), ]
+relax_sm$VIDEO <- factor(relax_sm$VIDEO, levels = unique(relax_sm$VIDEO))
+relax_sm <- baseline_correct(relax_sm)
+relax_sm <- relax_sm[relax_sm$time <= t_max, ]
+relax_sm$plastic_group3 <- group_plastic_3(relax_sm$Total_mass)
+
+agg_relax3 <- aggregate(value_delta ~ time + plastic_group3, data = relax_sm, FUN = mean_sem)
+agg_relax3 <- data.frame(
+  time          = agg_relax3$time,
+  plastic_group3= agg_relax3$plastic_group3,
+  mean          = agg_relax3$value_delta[, "mean"],
+  sd            = agg_relax3$value_delta[, "sd"],
+  n             = agg_relax3$value_delta[, "n"]
+)
+agg_relax3$sem   <- with(agg_relax3, sd / sqrt(pmax(n, 1)))
+agg_relax3$lower <- agg_relax3$mean - agg_relax3$sem
+agg_relax3$upper <- agg_relax3$mean + agg_relax3$sem
+agg_relax3 <- agg_relax3[!is.na(agg_relax3$plastic_group3), ]
+agg_relax3$time_min <- agg_relax3$time / 2
+
+pC_core <- ggplot(agg_relax3,
+                  aes(x = time_min, y = mean, colour = plastic_group3, fill = plastic_group3)) +
+  geom_hline(yintercept = 0, linewidth = 0.25, colour = "grey70") +
+  geom_ribbon(aes(ymin = lower, ymax = upper), alpha = 0.12, colour = NA) +
+  geom_line(linewidth = 0.9) +
+  scale_colour_manual(values = pal_group3, name = "Plastic load") +
+  scale_fill_manual(values = pal_group3, guide = "none") +
+  labs(x = "Time (minutes)", y = "Mean contraction force (\u0394 g)") +
+  coord_cartesian(xlim = c(0, xmax_min)) +
+  theme_classic(base_size = 10) +
+  theme(panel.grid = element_blank(),
+        axis.line  = element_line(linewidth = 0.6),
+        axis.ticks = element_line(linewidth = 0.5),
+        legend.position = "bottom",
+        legend.direction = "horizontal",
+        legend.title = element_text(size = 10),
+        legend.text  = element_text(size = 10),
+        plot.margin  = margin(2, 2, 2, 2))
+pC_noleg <- pC_core + theme(legend.position = "none")
+
+# ---------- Panel D (Legend only) ----------
+legend_df <- data.frame(
+  plastic_group3 = factor(names(pal_group3), levels = names(pal_group3)),
+  x = 1, y = 1
+)
+p_leg <- ggplot(legend_df, aes(x, y, colour = plastic_group3)) +
+  geom_point(size = 3) +
+  scale_colour_manual(values = pal_group3, name = "Plastic load") +
+  theme_void(base_size = 11) +
+  theme(legend.position = "center",
+        legend.direction = "horizontal",
+        legend.title = element_text(size = 11),
+        legend.text  = element_text(size = 10))
+leg_grob <- cowplot::get_legend(p_leg)
+pD <- ggdraw() + draw_grob(leg_grob)
+
+# ---------- Assemble 2x2 square and export ----------
+top_row <- plot_grid(pA, pB_noleg, ncol = 2, labels = c("A", "B"),
+                     label_fontface = "bold", label_size = 14)
+bot_row <- plot_grid(pC_noleg, pD,    ncol = 2, labels = c("C", "D"),
+                     label_fontface = "bold", label_size = 14)
+fig_ABCD_2 <- plot_grid(top_row, bot_row, nrow = 2, rel_heights = c(1, 1))
+
+ggsave("figure_ABCD_square_3groups.pdf", fig_ABCD, device = cairo_pdf,
+       width = 180, height = 180, units = "mm")
+
+fig_ABCD_2
+
+```
+
+
+```{r}
+colnames(mass_df)
+mass_df_new<-mass_df[,c(1,6,7,8)]
+
+colnames(mass_df_new)<-c("ID", "Total_plas_mass",   "Total_plas_number", "Stomach_weight")
+write.csv(mass_df_new, "stomach_hypertrophy.csv")
+```
+
+
+
+

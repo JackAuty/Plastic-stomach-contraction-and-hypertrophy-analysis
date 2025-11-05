@@ -1,0 +1,74 @@
+
+#TOC {
+  background-color: rgba(208, 231, 255, 0.3); /* light transparent blue */
+  border: 1px solid #6495ED;                  /* soft blue outline */
+  border-radius: 6px;
+  padding: 15px 20px;
+  margin-bottom: 30px;
+  position: relative;
+}
+
+/* Add a title inside the TOC box */
+#TOC::before {
+  content: "Table of Contents";
+  display: block;
+  font-weight: bold;
+  font-size: 18px;
+  color: #333333;
+  margin-bottom: 10px;
+}
+
+h1 {
+    border-top: 1px solid #ccc;
+    font-size: 16px;
+    color: #333333;
+    font-weight: bold;
+    margin-top: 30px;
+    padding-top: 10px;
+  }
+h1.title {
+  border-top: 0px solid #fff;
+  font-size: 18px;
+  color: #333333;
+  font-weight: bold;
+  margin-bottom: 5px;
+}
+
+h2 {
+
+  font-size: 15px;
+  color: #333333;
+  font-weight: bold;
+  margin-top: 30px;
+}
+h3 {
+
+  font-size: 13px;
+  color: #333333;
+  font-weight: bold;
+  margin-top: 30px;
+}
+h4 {
+  font-size: 13px;
+  color: #6495ED;
+  font-weight: bold;
+  margin-top: 2px;
+  margin-bottom: 2px;
+}
+
+pre {
+  background-color: #e0fdfa66;   /* very light aqua (minty seafoam) */
+  border: 1px solid #a0e7e5;   /* soft aqua/turquoise border */
+  padding: 10px 12px;
+  border-radius: 6px;
+  overflow-x: auto;
+}
+
+.hljs-comment {
+  color: #444444; /* dark grey */
+  font-size: 10px;
+}
+.hljs {
+  color: #000000;
+  font-size: 12px;
+}
