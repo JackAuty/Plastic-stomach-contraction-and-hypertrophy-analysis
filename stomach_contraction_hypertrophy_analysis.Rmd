@@ -1,6 +1,7 @@
 ---
-title: "Default Rmarkdown Template"
+title: "Stomach contraction and hypertrophy analysis"
 author: "Jack Auty"
+version: "3.1"
 date: "`r Sys.Date()`"
 output:
     html_document:
@@ -27,11 +28,13 @@ options(scipen = 999)
 # Load Required Packages
 
 ```{r load-packages, warning=FALSE, message=FALSE, results='hide'}
-packages <- c("ggplot2", "cowplot", "viridisLite", "sjPlot")
+packages <- c("ggplot2", "cowplot", "viridisLite", "sjPlot", "grid")
 invisible(lapply(packages, function(pkg) {
   if (!requireNamespace(pkg, quietly = TRUE)) install.packages(pkg)
   library(pkg, character.only = TRUE)
 }))
+
+
 ```
 
 # Citations
@@ -61,7 +64,7 @@ sjPlot::tab_df(
 # Load and Prepare Data
 
 ```{r load-data}
-DATA_DIR  <- "C:/Users/jrivers/Dropbox/Science/Projects/Stomach contraction paper/Plastic stomach contraction analysis v2"
+DATA_DIR <- usethis::proj_get() 
 ts_path   <- file.path(DATA_DIR, "final_trim.csv")
 map_path  <- file.path(DATA_DIR, "video_map.csv")     # VIDEO, BIRD-ID, PHASE
 mass_path <- file.path(DATA_DIR, "masses.csv")        # ID, Total_mass, etc.
@@ -87,12 +90,35 @@ norm_id_mass <- function(x){
 }
 map_df$BIRD_KEY  <- trimws(as.character(map_df$BIRD_ID))
 mass_df$BIRD_KEY <- norm_id_mass(mass_df$ID)
-tab_df(head(mass_df))
-tab_df(table(mass_df$ID))
-#Find all rows with duplicate BIRD_KEY and add those weights and numbers together.
-#
-#
 
+#This code shows there are duplicate BIRD_KEYS/ID due to multiple measures of plastic weight and count due to bolus, lavage and necropsy sources
+
+#tab_df(head(mass_df))
+#tab_df(table(mass_df$ID))
+
+#Find all rows with duplicate BIRD_KEY and add those weights and numbers together.
+## One row per bird: sum numeric columns within ID + BIRD_KEY
+
+# 1) Pick the numeric columns to sum
+is_num <- sapply(mass_df, is.numeric)
+
+# 2) Summariser that keeps NA if everything is NA in a group
+sum_keep_na <- function(x) {
+  if (all(is.na(x))) return(NA_real_)
+  sum(x, na.rm = TRUE)
+}
+
+# 3) Aggregate: sums for numeric columns, grouped by ID + BIRD_KEY
+mass_by_bird <- aggregate(
+  mass_df[, is_num, drop = FALSE],
+  by = list(ID = mass_df$ID, BIRD_KEY = mass_df$BIRD_KEY),
+  FUN = sum_keep_na
+)
+
+
+#Storing original dataset and replacing the aggregated dataset
+mass_df_store <- mass_df
+mass_df <- mass_by_bird
 
 # Ensure numeric time series
 ts_df[] <- lapply(ts_df, function(x) suppressWarnings(as.numeric(x)))
@@ -491,41 +517,45 @@ ggsave(
 # A: Wt vs plastic (points coloured by plastic_group)
 # B: Contract mean ± SEM (minutes)
 # C: Relaxation mean ± SEM (minutes)
-# D: Legend ONLY (robust)
+# D: Legend ONLY (robust, centred)
 library(ggplot2)
 library(cowplot)
 library(grid)
 
-# Palette / settings
+# Palette and settings
 if (!exists("pal_group")) {
-  pal_group <- c("Low plastic (≤0.5)" = "#0072B2", "High plastic (>0.5)" = "#D55E00")
+  pal_group <- c("Low plastic (≤0.5)" = "#0072B2",
+                 "High plastic (>0.5)" = "#D55E00")
 }
 if (!exists("t_max")) t_max <- 120
 xmax_min <- t_max / 2
 
 # ---------- Panel A ----------
 stopifnot(exists("mass_df"))
-dfA <- subset(mass_df, is.finite(Total_mass) & is.finite(Wt))
-dfA$plastic_group <- factor(ifelse(dfA$Total_mass > 0.5,
-                                   "High plastic (>0.5)", "Low plastic (≤0.5)"),
-                            levels = names(pal_group))
+dfA <- within(mass_df, {
+  Total_mass <- suppressWarnings(as.numeric(Total_mass))
+  Wt         <- suppressWarnings(as.numeric(Wt))
+})
+dfA <- dfA[is.finite(dfA$Total_mass) & is.finite(dfA$Wt), , drop = FALSE]
+dfA$plastic_group <- factor(
+  ifelse(dfA$Total_mass > 0.5, "High plastic (>0.5)", "Low plastic (≤0.5)"),
+  levels = names(pal_group)
+)
 
-pA <- ggplot(dfA, aes(Total_mass, Wt,colour = plastic_group, fill = plastic_group)) +
+pA <- ggplot(dfA, aes(Total_mass, Wt, colour = plastic_group, fill = plastic_group)) +
   geom_smooth(method = "lm", se = TRUE, colour = "grey40",
               fill = grDevices::adjustcolor("grey40", alpha.f = 0.125),
               linewidth = 0.5) +
-  geom_point(aes(colour = plastic_group, fill = plastic_group),
-             shape = 21, size = 2.4, stroke = 0.35,
-             alpha = 0.4) +
+  geom_point(shape = 21, size = 2.4, stroke = 0.35, alpha = 0.4) +
   scale_colour_manual(values = pal_group, name = "Plastic load") +
-  scale_fill_manual(values = pal_group, guide = "none")+
+  scale_fill_manual(values = pal_group, guide = "none") +
+  guides(colour = "none") +
   labs(x = "Plastic mass (g)", y = "Stomach weight (g)") +
   theme_classic(base_size = 11) +
   theme(panel.grid = element_blank(),
         axis.line  = element_line(linewidth = 0.6),
         axis.ticks = element_line(linewidth = 0.5),
-        plot.margin = margin(2, 2, 2, 2),
-        legend.position = "none")
+        plot.margin = margin(2, 2, 2, 2))
 
 # ---------- Panel B (Contract) ----------
 stopifnot(exists("agg_s"))
@@ -543,12 +573,8 @@ pB_core <- ggplot(agg_s2, aes(x = time_min, y = mean, colour = plastic_group, fi
   theme(panel.grid = element_blank(),
         axis.line  = element_line(linewidth = 0.6),
         axis.ticks = element_line(linewidth = 0.5),
-        legend.position = "bottom",
-        legend.direction = "horizontal",
-        legend.title = element_text(size = 10),
-        legend.text  = element_text(size = 10),
         plot.margin  = margin(2, 2, 2, 2))
-pB_noleg <- pB_core + theme(legend.position = "none")
+pB_noleg <- pB_core + guides(colour = "none", fill = "none") + theme(legend.position = "none")
 
 # ---------- Panel C (Relaxation) ----------
 if (!exists("agg_relax")) {
@@ -585,54 +611,54 @@ pC_core <- ggplot(agg_relax2, aes(x = time_min, y = mean, colour = plastic_group
   theme(panel.grid = element_blank(),
         axis.line  = element_line(linewidth = 0.6),
         axis.ticks = element_line(linewidth = 0.5),
-        legend.position = "bottom",
-        legend.direction = "horizontal",
-        legend.title = element_text(size = 10),
-        legend.text  = element_text(size = 10),
         plot.margin  = margin(2, 2, 2, 2))
-pC_noleg <- pC_core + theme(legend.position = "none")
+pC_noleg <- pC_core + guides(colour = "none", fill = "none") + theme(legend.position = "none")
 
-# ---------- Panel D (Legend only) — robust creation ----------
-# 1) Try to extract directly from B (preferred look)
-leg_grob <- tryCatch(
-  cowplot::get_legend(pB_core + theme(legend.position = "center")),
-  error = function(e) NULL
+# ---------- Panel D (Legend only) ----------
+# Build a dedicated legend plot, centred, with title on top to reduce width
+legend_df <- data.frame(
+  plastic_group = factor(names(pal_group), levels = names(pal_group)),
+  x = 1, y = 1
 )
 
-# 2) Fallback: build a tiny dummy plot that ONLY produces the legend
-if (is.null(leg_grob) || !inherits(leg_grob, "gtable")) {
-  legend_df <- data.frame(
-    plastic_group = factor(names(pal_group), levels = names(pal_group)),
-    x = 1, y = 1
-  )
-  p_leg <- ggplot(legend_df, aes(x, y, colour = plastic_group)) +
-    geom_point(size = 3) +
-    scale_colour_manual(values = pal_group, name = "Plastic load") +
-    theme_void(base_size = 11) +
-    theme(legend.position = "center",
-          legend.direction = "horizontal",
-          legend.title = element_text(size = 11),
-          legend.text  = element_text(size = 10))
-  leg_grob <- cowplot::get_legend(p_leg)
-}
-pD <- ggdraw() + draw_grob(leg_grob)
+pD <- ggplot(legend_df, aes(x, y, colour = plastic_group)) +
+  # invisible line so the legend shows line keys; override to make them visible in the key
+  geom_line(size = 1.1, alpha = 0) +
+  scale_colour_manual(values = pal_group, name = "Plastic load") +
+  guides(colour = guide_legend(title.position = "top",
+                               nrow = 1,
+                               override.aes = list(alpha = 1, size = 1.1))) +
+  theme_void(base_size = 11) +
+  theme(legend.position = c(0.5, 0.5),
+        legend.justification = c(0.5, 0.5),
+        legend.direction = "horizontal",
+        legend.title = element_text(size = 11),
+        legend.text  = element_text(size = 10),
+        legend.background = element_blank())
 
-# ---------- Assemble 2x2 square and export ----------
-top_row <- plot_grid(pA, pB_noleg, ncol = 2, labels = c("A", "B"),
-                     label_fontface = "bold", label_size = 14)
-bot_row <- plot_grid(pC_noleg, pD,    ncol = 2, labels = c("C", "D"),
-                     label_fontface = "bold", label_size = 14)
-fig_ABCD <- plot_grid(top_row, bot_row, nrow = 2, rel_heights = c(1, 1))
+# ---------- Assemble 2x2 and export ----------
+top_row <- cowplot::plot_grid(
+  pA, pB_noleg, ncol = 2,
+  labels = c("A", "B"),
+  label_fontface = "bold", label_size = 14
+)
+bot_row <- cowplot::plot_grid(
+  pC_noleg, pD, ncol = 2,
+  labels = c("C", "D"),
+  label_fontface = "bold", label_size = 14
+)
+fig_ABCD <- cowplot::plot_grid(top_row, bot_row, nrow = 2, rel_heights = c(1, 1))
 
-ggsave("figure_ABCD_square.pdf", fig_ABCD, device = cairo_pdf,
-       width = 180, height = 180, units = "mm")
-
-
-
+# Save
+dev_fun <- if (capabilities("cairo")) cairo_pdf else "pdf"
+ggsave("figure_ABCD_square.pdf", fig_ABCD, device = dev_fun,
+       width = 270, height = 180, units = "mm")
 
 fig_ABCD
 
+
 ```
+
 
 ```{r}
 # === Square 2x2 figure with THREE groups (<0.3 g, 0.3–20 g, ≥20 g) and legend in D ===
@@ -825,7 +851,7 @@ fig_ABCD_2
 
 
 ```{r}
-colnames(mass_df)
+
 mass_df_new<-mass_df[,c(1,6,7,8)]
 
 colnames(mass_df_new)<-c("ID", "Total_plas_mass",   "Total_plas_number", "Stomach_weight")

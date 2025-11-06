@@ -1,0 +1,318 @@
+---
+title: "Stomach contraction and hypertrophy analysis"
+author: "Jack Auty"
+version: "3.1"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    toc: true
+    toc_title: "Table of Contents"
+    number_sections: true
+---
+
+```{r CSS install, include=T, results='asis', comment=NA, echo=F}
+x <- tryCatch(readLines("https://raw.githubusercontent.com/JackAuty/RmarkdownStyle/main/styles.css"),
+              error=function(e) "")
+if (length(x)) cat("<style>\n", paste(x, collapse="\n"), "\n</style>")
+```
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE)
+options(scipen = 999)
+```
+
+# Load packages once
+
+```{r load-packages, message=FALSE}
+packages <- c("ggplot2", "cowplot", "viridisLite", "sjPlot", "grid", "usethis")
+invisible(lapply(packages, function(pkg) {
+  if (!requireNamespace(pkg, quietly = TRUE)) install.packages(pkg)
+  library(pkg, character.only = TRUE)
+}))
+```
+
+# Citations
+
+```{r}
+pkg <- packages
+citation_list <- character()
+cln <- function(txt){
+  txt <- gsub("\\\\texttt\\{(.*?)\\}", "\\1", txt)
+  txt <- gsub("[_*\"“”]", "", txt)
+  txt <- gsub(", \\.$|\\s*\\.$", "", txt)
+  trimws(txt)
+}
+for (i in pkg) {
+  raw <- paste(capture.output(print(citation(i), style = "text", bibtex = FALSE)), collapse = "\n")
+  citation_list <- c(citation_list, cln(raw))
+}
+sjPlot::tab_df(data.frame(References = citation_list), col.header = "References", sep = " ")
+```
+
+# Load data
+
+```{r load-data}
+DATA_DIR <- usethis::proj_get()
+ts_path   <- file.path(DATA_DIR, "final_trim.csv")
+map_path  <- file.path(DATA_DIR, "video_map.csv")
+mass_path <- file.path(DATA_DIR, "masses.csv")
+
+ts_df   <- read.csv(ts_path,  check.names = TRUE)
+map_df  <- read.csv(map_path, check.names = TRUE, strip.white = TRUE)
+mass_df <- read.csv(mass_path, check.names = TRUE, strip.white = TRUE)
+```
+
+# Prepare keys and collapse duplicates
+
+```{r keys-collapse}
+# Common BIRD_KEY
+names(map_df) <- sub("BIRD[._-]?ID", "BIRD_ID", names(map_df), ignore.case = TRUE)
+
+norm_id_mass <- function(x){
+  x <- trimws(as.character(x))
+  out <- x
+  # NL-2025-10 -> NL-10
+  m <- grepl("^[A-Z]+-20[0-9]{2}-[0-9]+$", x)
+  out[m] <- sub("^([A-Z]+)-20[0-9]{2}-([0-9]+)$", "\\1-\\2", x[m])
+  # 380-02015 -> 02015
+  m <- grepl("^[0-9]{3}-[0-9]+$", x)
+  out[m] <- sub("^[0-9]{3}-([0-9]+)$", "\\1", x[m])
+  out
+}
+
+# Normalise BOTH sides
+map_df$BIRD_KEY  <- norm_id_mass(map_df$BIRD_ID)
+mass_df$BIRD_KEY <- norm_id_mass(mass_df$ID)
+
+# Collapse duplicate rows in mass_df by ID + BIRD_KEY (sum numeric cols)
+is_num <- sapply(mass_df, is.numeric)
+sum_keep_na <- function(x) if (all(is.na(x))) NA_real_ else sum(x, na.rm = TRUE)
+
+mass_df <- aggregate(
+  mass_df[, is_num, drop = FALSE],
+  by = list(ID = mass_df$ID, BIRD_KEY = mass_df$BIRD_KEY),
+  FUN = sum_keep_na
+)
+```
+
+# Helpers
+
+```{r helpers}
+# Long format for columns ending with the given suffix
+make_long <- function(df, suffix){
+  keep <- names(df)[grepl(paste0("(", suffix, ")$"), names(df), ignore.case = TRUE)]
+  L <- stack(df[keep])
+  L$time <- rep.int(seq_len(nrow(df)), times = length(keep))
+  names(L) <- c("values", "ind", "time")
+  L$VIDEO <- sub(paste0("_(?i:", suffix, ")$"), "", L$ind, perl = TRUE)
+  L
+}
+
+# Baseline: subtract value at time == 0 (or first non-NA if no 0 present)
+baseline_correct <- function(df){
+  df <- df[order(df$VIDEO, df$time), ]
+  df$baseline0 <- NA_real_
+  for (v in unique(df$VIDEO)){
+    idx <- which(df$VIDEO == v)
+    d   <- df[idx, ]
+    i0  <- which(d$time == 0 & !is.na(d$values))
+    if (!length(i0)) i0 <- which(!is.na(d$values))[1]
+    if (length(i0)) df$baseline0[idx] <- d$values[i0[1]]
+  }
+  df$value_delta <- df$values - df$baseline0
+  df
+}
+
+# Simple summary
+mean_sem <- function(x){
+  m  <- mean(x, na.rm = TRUE)
+  sd <- stats::sd(x, na.rm = TRUE)
+  n  <- sum(!is.na(x))
+  c(mean = m, sd = sd, n = n)
+}
+
+# Palette and settings
+pal_group <- c("Low plastic (≤0.5)" = "#0072B2", "High plastic (>0.5)" = "#D55E00")
+na_col    <- "#999999"
+theme_small <- theme_minimal(base_size = 7) +
+  theme(panel.grid.minor = element_blank())
+t_max <- 120
+
+# Two-level grouping by Total_mass
+grp2 <- function(x){
+  out <- ifelse(is.na(x), NA,
+         ifelse(x > 0.5, "High plastic (>0.5)", "Low plastic (≤0.5)"))
+  factor(out, levels = names(pal_group))
+}
+```
+
+# Build long data and merge metadata
+
+```{r build-merged}
+raw_long <- make_long(ts_df, "raw")
+sm_long  <- make_long(ts_df, "smoothed")
+
+keep_cols <- c("VIDEO","BIRD_ID","BIRD_KEY","PHASE")
+raw_m <- merge(raw_long, map_df[keep_cols], by = "VIDEO", all.x = TRUE)
+sm_m  <- merge(sm_long,  map_df[keep_cols], by = "VIDEO", all.x = TRUE)
+
+# Add Total_mass etc. so we can form plastic groups
+mass_keep  <- intersect(c("BIRD_KEY","Total_mass","Wt","Stomach_mass","Total_number"), names(mass_df))
+merged_raw <- merge(raw_m, mass_df[mass_keep], by = "BIRD_KEY", all.x = TRUE)
+merged_sm  <- merge(sm_m, mass_df[mass_keep], by = "BIRD_KEY", all.x = TRUE)
+
+# Quick sanity
+# print(table(!is.na(merged_raw$Total_mass)))
+```
+
+# Figure 1: AB – Wt vs plastic mass and Contract SM mean ± SEM (legend below)
+
+```{r figure-1}
+# Scatter (A)
+df_scatter <- subset(mass_df, is.finite(Total_mass) & is.finite(Wt))
+pear <- suppressWarnings(cor(df_scatter$Total_mass, df_scatter$Wt, use = "complete.obs", method = "pearson"))
+pA <- ggplot(df_scatter, aes(x = Total_mass, y = Wt)) +
+  geom_smooth(method = "lm", se = TRUE, linewidth = 0.9, colour = "grey55", fill = "grey85", na.rm = TRUE) +
+  geom_point(shape = 21, size = 2.4, stroke = 0.3, colour = "grey25",
+             fill = scales::alpha("#0072B2", 0.35), na.rm = TRUE) +
+  labs(x = "Plastic mass (g)", y = "Stomach weight (g)",
+       subtitle = sprintf("Linear fit • Pearson r = %.2f", pear)) +
+  theme_classic(base_size = 11)
+
+# Contract (smoothed) mean ± SEM (B)
+sm_contract <- subset(merged_sm, grepl("^Contract", PHASE, ignore.case = TRUE))
+sm_contract$VIDEO <- factor(sm_contract$VIDEO, levels = unique(sm_contract$VIDEO))
+sm_contract <- baseline_correct(sm_contract)
+sm_contract <- subset(sm_contract, time <= t_max)
+sm_contract$plastic_group <- grp2(sm_contract$Total_mass)
+
+agg_s <- aggregate(value_delta ~ time + plastic_group,
+                   data = subset(sm_contract, !is.na(plastic_group)),
+                   FUN = mean_sem)
+agg_s <- data.frame(time = agg_s$time,
+                    plastic_group = agg_s$plastic_group,
+                    mean = agg_s$value_delta[, "mean"],
+                    sd   = agg_s$value_delta[, "sd"],
+                    n    = agg_s$value_delta[, "n"])
+agg_s$sem   <- with(agg_s, sd / sqrt(pmax(n, 1)))
+agg_s$lower <- agg_s$mean - agg_s$sem
+agg_s$upper <- agg_s$mean + agg_s$sem
+agg_s$time_min <- agg_s$time / 2
+
+pB_core <- ggplot(agg_s, aes(x = time_min, y = mean, colour = plastic_group, fill = plastic_group)) +
+  geom_hline(yintercept = 0, linewidth = 0.25, colour = "grey70") +
+  geom_ribbon(aes(ymin = lower, ymax = upper), alpha = 0.12, colour = NA) +
+  geom_line(linewidth = 0.9) +
+  scale_colour_manual(values = pal_group, guide = guide_legend(title = "Plastic load")) +
+  scale_fill_manual(values = pal_group, guide = "none") +
+  labs(x = "Time (minutes)", y = "Mean contraction force (Δ g)") +
+  coord_cartesian(xlim = c(0, t_max/2)) +
+  theme_classic(base_size = 11)
+
+leg_B <- cowplot::get_legend(pB_core + theme(legend.position = "bottom"))
+pB    <- cowplot::plot_grid(pB_core + theme(legend.position = "none"),
+                            leg_B, ncol = 1, rel_heights = c(1, 0.14))
+
+# Combine A and B
+fig1 <- cowplot::plot_grid(pA + labs(subtitle = NULL), pB,
+                           labels = c("A","B"),
+                           label_fontface = "bold", label_size = 14,
+                           nrow = 1, rel_widths = c(1, 1.25))
+
+
+print(fig1)
+
+ggsave("Figure 1.pdf", fig1,  
+       width = 270, height = 95, units = "mm")
+```
+
+# Figure 2: ABCD square – A scatter, B contract, C relax, D legend (270 × 180 mm)
+
+```{r figure-2}
+# A
+dfA <- transform(df_scatter,
+                 plastic_group = factor(ifelse(Total_mass > 0.5, "High plastic (>0.5)", "Low plastic (≤0.5)"),
+                                        levels = names(pal_group)))
+pA2 <- ggplot(dfA, aes(Total_mass, Wt, colour = plastic_group, fill = plastic_group)) +
+  geom_smooth(method = "lm", se = TRUE, colour = "grey40", fill = scales::alpha("grey40", 0.125), linewidth = 0.5) +
+  geom_point(shape = 21, size = 2.4, stroke = 0.35, alpha = 0.4) +
+  scale_colour_manual(values = pal_group, name = "Plastic load") +
+  scale_fill_manual(values = pal_group, guide = "none") +
+  guides(colour = "none") +
+  labs(x = "Plastic mass (g)", y = "Stomach weight (g)") +
+  theme_classic(base_size = 11)
+
+# B
+agg_s2 <- transform(agg_s, time_min = time/2)
+pB2 <- ggplot(agg_s2, aes(x = time_min, y = mean, colour = plastic_group, fill = plastic_group)) +
+  geom_hline(yintercept = 0, linewidth = 0.25, colour = "grey70") +
+  geom_ribbon(aes(ymin = lower, ymax = upper), alpha = 0.12, colour = NA) +
+  geom_line(linewidth = 0.9) +
+  scale_colour_manual(values = pal_group, name = "Plastic load") +
+  scale_fill_manual(values = pal_group, guide = "none") +
+  labs(x = "Time (minutes)", y = "Contraction force (Δ g)") +
+  coord_cartesian(xlim = c(0, t_max/2)) +
+  theme_classic(base_size = 10) +
+  theme(legend.position = "none")
+
+# C
+relax_sm <- subset(merged_sm, grepl("^(Relax|Relaxation)", PHASE, ignore.case = TRUE))
+relax_sm$VIDEO <- factor(relax_sm$VIDEO, levels = unique(relax_sm$VIDEO))
+relax_sm <- baseline_correct(relax_sm)
+relax_sm <- subset(relax_sm, time <= t_max)
+relax_sm$plastic_group <- grp2(relax_sm$Total_mass)
+
+agg_relax <- aggregate(value_delta ~ time + plastic_group,
+                       data = subset(relax_sm, !is.na(plastic_group)),
+                       FUN = mean_sem)
+agg_relax <- data.frame(time = agg_relax$time,
+                        plastic_group = agg_relax$plastic_group,
+                        mean = agg_relax$value_delta[, "mean"],
+                        sd   = agg_relax$value_delta[, "sd"],
+                        n    = agg_relax$value_delta[, "n"])
+agg_relax$sem   <- with(agg_relax, sd / sqrt(pmax(n, 1)))
+agg_relax$lower <- agg_relax$mean - agg_relax$sem
+agg_relax$upper <- agg_relax$mean + agg_relax$sem
+agg_relax2 <- transform(agg_relax, time_min = time / 2)
+
+pC2 <- ggplot(agg_relax2, aes(x = time_min, y = mean, colour = plastic_group, fill = plastic_group)) +
+  geom_hline(yintercept = 0, linewidth = 0.25, colour = "grey70") +
+  geom_ribbon(aes(ymin = lower, ymax = upper), alpha = 0.12, colour = NA) +
+  geom_line(linewidth = 0.9) +
+  scale_colour_manual(values = pal_group, name = "Plastic load") +
+  scale_fill_manual(values = pal_group, guide = "none") +
+  labs(x = "Time (minutes)", y = "Relaxation (Δ g)") +
+  coord_cartesian(xlim = c(0, t_max/2)) +
+  theme_classic(base_size = 10) +
+  theme(legend.position = "none")
+
+# D: centred legend
+legend_df <- data.frame(plastic_group = factor(names(pal_group), levels = names(pal_group)), x = 1, y = 1)
+pD <- ggplot(legend_df, aes(x, y, colour = plastic_group)) +
+  geom_line(size = 1.1, alpha = 0) +
+  scale_colour_manual(values = pal_group, name = "Plastic load") +
+  guides(colour = guide_legend(title.position = "top", nrow = 1, override.aes = list(alpha = 1, size = 1.1))) +
+  theme_void(base_size = 11) +
+  theme(legend.position = c(0.5, 0.5),
+        legend.justification = c(0.5, 0.5),
+        legend.direction = "horizontal",
+        legend.title = element_text(size = 11),
+        legend.text  = element_text(size = 10))
+
+top_row <- cowplot::plot_grid(pA2, pB2, ncol = 2, labels = c("A","B"), label_fontface = "bold", label_size = 14)
+bot_row <- cowplot::plot_grid(pC2, pD,  ncol = 2, labels = c("C","D"), label_fontface = "bold", label_size = 14)
+fig2 <- cowplot::plot_grid(top_row, bot_row, nrow = 2, rel_heights = c(1, 1))
+print(fig2)
+
+ggsave("Figure 2.pdf", fig2, 
+       width = 270, height = 180, units = "mm")
+```
+
+
+# Export hypertrophy CSV
+
+```{r export-csv}
+mass_df_new <- mass_df[, c(1,6,7,8)]
+colnames(mass_df_new) <- c("ID", "Total_plas_mass", "Total_plas_number", "Stomach_weight")
+write.csv(mass_df_new, "stomach_hypertrophy.csv", row.names = FALSE)
+```
