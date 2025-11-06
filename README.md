@@ -48,14 +48,6 @@ The R Markdown document
     ├─ Figure 2.pdf                                 # ABCD square with legend in panel D (270 × 180 mm)
     └─ stomach_hypertrophy.csv                      # Export: ID, plastic mass/number, stomach weight
 
-> If figures do not show on GitHub after knitting, check `.gitignore` is
-> not excluding `*.pdf`. You can keep a broad rule but allow specific
-> files by adding:
->
-> \`\`\` \*.pdf !Figure 1.pdf !Figure 2.pdf
-
-> \`\`\`
-
 ## How to run
 
 1.  Open the `.Rproj` in RStudio (or run `usethis::proj_activate()` in
