@@ -47,7 +47,6 @@ The R Markdown document **`stomach_contraction_analysis_FIGS_v3_1.Rmd`**:
 > *.pdf
 > !Figure 1.pdf
 > !Figure 2.pdf
-
 > ```
 
 ## How to run
@@ -71,7 +70,6 @@ The R Markdown document **`stomach_contraction_analysis_FIGS_v3_1.Rmd`**:
 
 - **Figure 1**: Panel A shows stomach weight vs plastic mass with a linear fit. Panel B shows mean contraction with SEM by plastic group on a minutes scale. Legend sits below panel B.  
 - **Figure 2**: Square layout A–D with a **standalone centred legend** in panel D. Saved at **270 × 180 mm**.  
-
 
 All figures are saved with embedded fonts suitable for journal submission when using a PDF device in `ggsave()`.
 
