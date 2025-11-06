@@ -103,5 +103,5 @@ citation("ggplot2"); citation("cowplot"); citation("sjPlot")
 
 ## Contact
 
-For questions about analysis or data, contact **Jack Rivers Auty**.  
+For questions about analysis or data, contact **Jack Rivers Auty** at jack.auty@utas.edu.au.  
 For manuscript queries, contact **Ingrid L. Pollet**.
