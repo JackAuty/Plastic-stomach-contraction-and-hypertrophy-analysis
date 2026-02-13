@@ -1,4 +1,4 @@
-"ID","Prov_plastic_mass","Total_plas_mass","Total_plas_number","Stomach_weight"
+"ID","Prov_plastic_mass","Stomach_plas_mass","Stomach_plas_number","Stomach_weight"
 "380-00205",NA,NA,0,0
 "380-00399",NA,NA,0,0
 "380-02001",0.02,NA,0.02,2
