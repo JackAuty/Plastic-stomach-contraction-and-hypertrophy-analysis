@@ -82,6 +82,7 @@ norm_id_mass <- function(x){
 
 # Normalise BOTH sides
 map_df$BIRD_KEY  <- norm_id_mass(map_df$BIRD_ID)
+map_df$BIRD_KEY <- sub("^BW-([0-9])$", "BW-0\\1", map_df$BIRD_KEY)
 mass_df$BIRD_KEY <- norm_id_mass(mass_df$ID)
 
 # Collapse duplicate rows in mass_df by ID + BIRD_KEY (sum numeric cols)
@@ -162,7 +163,7 @@ merged_raw <- merge(raw_m, mass_df[mass_keep], by = "BIRD_KEY", all.x = TRUE)
 merged_sm  <- merge(sm_m, mass_df[mass_keep], by = "BIRD_KEY", all.x = TRUE)
 
 # Quick sanity
-# print(table(!is.na(merged_raw$Total_mass)))
+unique(merged_sm$BIRD_KEY)
 ```
 
 # Figure 1: AB – Wt vs plastic mass and Contract SM mean ± SEM (legend below)
@@ -312,8 +313,9 @@ ggsave("Figure 2.pdf", fig2,
 # Export hypertrophy CSV
 
 ```{r export-csv}
-mass_df_new <- mass_df[, c(1,3,6,7,8)]
-colnames(mass_df_new) <- c("ID", "Prov_plastic_mass", "Stomach_plas_mass", "Stomach_plas_number", "Stomach_weight")
+mass_df_new <- mass_df[, c("BIRD_KEY", "Stomach_mass", "Stomach_number", "Total_mass", "Total_number", "Wt")]
+colnames(mass_df_new) <- c("ID", "Prov_plastic_mass", "Prov_plasic_number", "Total_plastic_mass", "Total_plastic_number", "Stomach_weight")
+mass_df_new <- mass_df_new[!is.na(mass_df_new$Stomach_weight),]
 write.csv(mass_df_new, "stomach_hypertrophy_prov_mass.csv", row.names = FALSE)
 ```
 
