@@ -520,3 +520,243 @@ res_rel_body_mass <- fit_gamm_compare_body_mass(
   d_rel,
   "Relaxation"
 )
+
+# ============================================================
+# Plot GAMM curves adjusted for bird body weight
+# ============================================================
+
+make_body_mass_adjusted_predictions <- function(
+    model_result,
+    n_time_points = 300
+) {
+
+  # Full GAMM containing body mass, plastic group and
+  # group-specific smooths over time
+  model <- model_result$m1$gam
+  model_data <- model_result$dat
+
+  # Prediction range
+  time_sequence <- seq(
+    min(model_data$time_min, na.rm = TRUE),
+    max(model_data$time_min, na.rm = TRUE),
+    length.out = n_time_points
+  )
+
+  # Preserve the factor levels used when fitting the model
+  plastic_levels <- levels(model_data$plastic_group)
+
+  prediction_data <- expand.grid(
+    time_min = time_sequence,
+    plastic_group = plastic_levels,
+    KEEP.OUT.ATTRS = FALSE,
+    stringsAsFactors = FALSE
+  )
+
+  prediction_data$plastic_group <- factor(
+    prediction_data$plastic_group,
+    levels = plastic_levels
+  )
+
+  # Body mass was centred before fitting the GAMM.
+  # A centred value of zero represents the mean bird body mass.
+  prediction_data$Bird_Body_Weight_c <- 0
+
+  predictions <- predict(
+    model,
+    newdata = prediction_data,
+    type = "response",
+    se.fit = TRUE
+  )
+
+  prediction_data$predicted <- as.numeric(predictions$fit)
+  prediction_data$se <- as.numeric(predictions$se.fit)
+
+  prediction_data$lower <- (
+    prediction_data$predicted -
+      prediction_data$se
+  )
+
+  prediction_data$upper <- (
+    prediction_data$predicted +
+      prediction_data$se
+  )
+
+  prediction_data$Bird_Body_Weight <- model_result$body_mass_mean
+
+  prediction_data
+}
+
+
+# Generate adjusted predictions
+pred_contraction <- make_body_mass_adjusted_predictions(
+  res_con_body_mass
+)
+
+pred_relaxation <- make_body_mass_adjusted_predictions(
+  res_rel_body_mass
+)
+
+
+# ============================================================
+# Contraction graph
+# ============================================================
+
+p_contraction_adjusted <- ggplot(
+  pred_contraction,
+  aes(
+    x = time_min,
+    y = predicted,
+    colour = plastic_group,
+    fill = plastic_group
+  )
+) +
+  geom_hline(
+    yintercept = 0,
+    linewidth = 0.3,
+    colour = "grey70"
+  ) +
+  geom_ribbon(
+    aes(
+      ymin = lower,
+      ymax = upper),
+    alpha = 0.15,
+    colour = NA
+  ) +
+  geom_line(
+    linewidth = 1
+  ) +
+  scale_colour_manual(
+    values = pal_group,
+    name = "Plastic load"
+  ) +
+  scale_fill_manual(
+    values = pal_group,
+    guide = "none"
+  ) +
+  labs(
+    x = "Time (minutes)",
+    y = "Body-weight-adjusted contraction force (Δ g)",
+    )
+  ) +
+  coord_cartesian(
+    xlim = c(0, t_max / 2)
+  ) +
+  theme_classic(
+    base_size = 11
+  ) +
+  theme(
+    legend.position = "bottom"
+  )
+
+
+# ============================================================
+# Relaxation graph
+# ============================================================
+
+p_relaxation_adjusted <- ggplot(
+  pred_relaxation,
+  aes(
+    x = time_min,
+    y = predicted,
+    colour = plastic_group,
+    fill = plastic_group
+  )
+) +
+  geom_hline(
+    yintercept = 0,
+    linewidth = 0.3,
+    colour = "grey70"
+  ) +
+  geom_ribbon(
+    aes(
+      ymin = lower,
+      ymax = upper
+    ),
+    alpha = 0.15,
+    colour = NA
+  ) +
+  geom_line(
+    linewidth = 1
+  ) +
+  scale_colour_manual(
+    values = pal_group,
+    name = "Plastic load"
+  ) +
+  scale_fill_manual(
+    values = pal_group,
+    guide = "none"
+  ) +
+  labs(
+    x = "Time (minutes)",
+    y = "Body-weight-adjusted relaxation (Δ g)",
+
+    )
+  ) +
+  coord_cartesian(
+    xlim = c(0, t_max / 2)
+  ) +
+  theme_classic(
+    base_size = 11
+  ) +
+  theme(
+    legend.position = "bottom"
+  )
+
+
+# Display separately
+print(p_contraction_adjusted)
+print(p_relaxation_adjusted)
+
+
+# ============================================================
+# Combine into one figure
+# ============================================================
+
+body_mass_adjusted_figure <- cowplot::plot_grid(
+  p_contraction_adjusted +
+    theme(legend.position = "none"),
+  p_relaxation_adjusted +
+    theme(legend.position = "none"),
+  labels = c("A", "B"),
+  label_fontface = "bold",
+  label_size = 14,
+  nrow = 1
+)
+
+adjusted_legend <- cowplot::get_legend(
+  p_contraction_adjusted +
+    theme(legend.position = "bottom")
+)
+
+body_mass_adjusted_figure <- cowplot::plot_grid(
+  body_mass_adjusted_figure,
+  adjusted_legend,
+  ncol = 1,
+  rel_heights = c(1, 0.12)
+)
+
+print(body_mass_adjusted_figure)
+
+
+# Save figure
+ggsave(
+  filename = "Figure_GAMM_body_weight_adjusted.pdf",
+  plot = body_mass_adjusted_figure,
+  width = 270,
+  height = 120,
+  units = "mm"
+)
+
+
+# Optional: export the plotted predictions
+write.csv(
+  pred_contraction,
+  "GAMM_body_weight_adjusted_contraction_predictions.csv",
+  row.names = FALSE
+)
+
+write.csv(
+  pred_relaxation,
+  "GAMM_body_weight_adjusted_relaxation_predictions.csv",
+  row.names = FALSE
+)
