@@ -139,7 +139,7 @@ mean_sem <- function(x){
 }
 
 # Palette and settings
-pal_group <- c("Low plastic (≤0.5)" = "#0072B2", "High plastic (>0.5)" = "#D55E00")
+pal_group <- c("Low plastic (<0.5)" = "#0072B2", "High plastic (>0.5)" = "#D55E00")
 na_col    <- "#999999"
 theme_small <- theme_minimal(base_size = 7) +
   theme(panel.grid.minor = element_blank())
@@ -148,7 +148,7 @@ t_max <- 120
 # Two-level grouping by Stomach_mass
 grp2 <- function(x){
   out <- ifelse(is.na(x), NA,
-         ifelse(x > 0.5, "High plastic (>0.5)", "Low plastic (≤0.5)"))
+         ifelse(x > 0.5, "High plastic (>0.5)", "Low plastic (<0.5)"))
   factor(out, levels = names(pal_group))
 }
 
@@ -245,7 +245,7 @@ ggsave("Figure 1.pdf", fig1,
 
 # A
 dfA <- transform(df_scatter,
-                 plastic_group = factor(ifelse(Stomach_mass > 0.5, "High plastic (>0.5)", "Low plastic (≤0.5)"),
+                 plastic_group = factor(ifelse(Stomach_mass > 0.5, "High plastic (>0.5)", "Low plastic (<0.5)"),
                                         levels = names(pal_group)))
 pA2 <- ggplot(dfA, aes(Stomach_mass, Wt, colour = plastic_group, fill = plastic_group)) +
   geom_smooth(method = "lm", se = TRUE, colour = "grey40", fill = scales::alpha("grey40", 0.125), linewidth = 0.5) +
@@ -636,8 +636,7 @@ p_contraction_adjusted <- ggplot(
   labs(
     x = "Time (minutes)",
     y = "Body-weight-adjusted contraction force (Δ g)",
-    )
-  ) +
+    )+
   coord_cartesian(
     xlim = c(0, t_max / 2)
   ) +
@@ -690,8 +689,7 @@ p_relaxation_adjusted <- ggplot(
     x = "Time (minutes)",
     y = "Body-weight-adjusted relaxation (Δ g)",
 
-    )
-  ) +
+    )+
   coord_cartesian(
     xlim = c(0, t_max / 2)
   ) +
